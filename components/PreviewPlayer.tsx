@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { SpriteConfig, ImageDimensions } from '../types';
 import { Play, Pause } from 'lucide-react';
 
@@ -55,7 +55,7 @@ const processTransparency = (
     const idx = y * width + x;
     if (visited[idx]) return;
     const pIdx = idx * 4;
-    // If pixel is valid match, add to queue
+    // If pixel is valid match and not already transparent, add to queue
     if (data[pIdx + 3] > 0 && matches(pIdx)) {
       visited[idx] = 1;
       queue.push(idx);
@@ -123,9 +123,21 @@ export const PreviewPlayer: React.FC<PreviewPlayerProps> = ({ imageUrl, config, 
   const requestRef = useRef<number>(0);
   const [isPlaying, setIsPlaying] = useState(true);
   const [currentFrameDisplayIndex, setCurrentFrameDisplayIndex] = useState(0); 
+  const [loadedImage, setLoadedImage] = useState<HTMLImageElement | null>(null);
+
+  // Load image once
+  useEffect(() => {
+    if (imageUrl) {
+      const img = new Image();
+      img.onload = () => setLoadedImage(img);
+      img.src = imageUrl;
+    } else {
+      setLoadedImage(null);
+    }
+  }, [imageUrl]);
   
   // Helper to get sequence of VALID frame indices
-  const getValidFrameIndices = () => {
+  const validIndices = useMemo(() => {
      const { rows, cols, totalFrames, excludedFrames, readOrder = 'row-major' } = config;
      const indices: number[] = [];
      
@@ -145,26 +157,25 @@ export const PreviewPlayer: React.FC<PreviewPlayerProps> = ({ imageUrl, config, 
          }
      }
      return indices;
-  };
+  }, [config.rows, config.cols, config.totalFrames, config.excludedFrames, config.readOrder]);
 
   useEffect(() => {
-    if (!imageUrl || !canvasRef.current || dimensions.width === 0) return;
+    if (!loadedImage || !canvasRef.current || dimensions.width === 0) return;
 
-    const img = new Image();
-    img.src = imageUrl;
-    
+    // Parse transparency config once per config change
     let transparentRGB: { r: number, g: number, b: number } | null = null;
+    let thresholdSq = 0;
+
     if (config.transparent) {
         transparentRGB = hexToRgb(config.transparent);
+        const maxDist = 441.67;
+        thresholdSq = Math.pow((config.tolerance / 100) * maxDist, 2);
     }
-    const maxDist = 441.67;
-    const thresholdSq = Math.pow((config.tolerance / 100) * maxDist, 2);
 
     const animate = (time: number) => {
       if (!canvasRef.current) return;
       
-      const validIndices = getValidFrameIndices();
-      if (validIndices.length === 0) return; // Nothing to play
+      if (validIndices.length === 0) return; 
 
       const { rows, cols, crop, scale, fps, autoAlign, alignMode } = config;
       const frameInterval = 1000 / fps;
@@ -173,7 +184,8 @@ export const PreviewPlayer: React.FC<PreviewPlayerProps> = ({ imageUrl, config, 
       const indexInValid = tick % validIndices.length;
       const frameIndex = validIndices[indexInValid];
       
-      setCurrentFrameDisplayIndex(indexInValid + 1);
+      // Only update state if changed to avoid re-renders
+      setCurrentFrameDisplayIndex(prev => prev !== indexInValid + 1 ? indexInValid + 1 : prev);
 
       const ctx = canvasRef.current.getContext('2d', { willReadFrequently: true });
       if (!ctx) return;
@@ -186,8 +198,10 @@ export const PreviewPlayer: React.FC<PreviewPlayerProps> = ({ imageUrl, config, 
       const cropH = Math.max(1, frameHeightRaw - crop.top - crop.bottom);
 
       // Canvas setup
-      canvasRef.current.width = cropW * scale;
-      canvasRef.current.height = cropH * scale;
+      if (canvasRef.current.width !== cropW * scale || canvasRef.current.height !== cropH * scale) {
+          canvasRef.current.width = cropW * scale;
+          canvasRef.current.height = cropH * scale;
+      }
       
       // Calculate row/col
       let col, row;
@@ -212,9 +226,10 @@ export const PreviewPlayer: React.FC<PreviewPlayerProps> = ({ imageUrl, config, 
       const tempCtx = tempCanvas.getContext('2d', { willReadFrequently: true });
       
       if (tempCtx) {
-          tempCtx.drawImage(img, srcX, srcY, cropW, cropH, 0, 0, cropW, cropH);
+          tempCtx.drawImage(loadedImage, srcX, srcY, cropW, cropH, 0, 0, cropW, cropH);
 
           // 2. Apply Transparency if enabled
+          // Check explicitly if we have valid RGB to avoid skipping when we should process
           if (config.transparent && transparentRGB) {
               const imgData = tempCtx.getImageData(0, 0, cropW, cropH);
               processTransparency(imgData.data, cropW, cropH, transparentRGB, thresholdSq, config.useFloodFill);
@@ -225,7 +240,6 @@ export const PreviewPlayer: React.FC<PreviewPlayerProps> = ({ imageUrl, config, 
           ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
           
           // Draw white background ONLY if transparency is OFF
-          // If transparency is ON, we want the CSS checkerboard to show through
           if (!config.transparent) {
               ctx.fillStyle = '#ffffff';
               ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
@@ -286,7 +300,7 @@ export const PreviewPlayer: React.FC<PreviewPlayerProps> = ({ imageUrl, config, 
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
-  }, [imageUrl, config, dimensions, isPlaying]);
+  }, [loadedImage, config, dimensions, isPlaying, validIndices]);
 
   if (!imageUrl) return null;
 
@@ -319,7 +333,7 @@ export const PreviewPlayer: React.FC<PreviewPlayerProps> = ({ imageUrl, config, 
           {isPlaying ? <Pause size={20} /> : <Play size={20} />}
         </button>
         <span className="text-xs font-mono text-slate-400 px-2">
-            帧: {currentFrameDisplayIndex} / {getValidFrameIndices().length}
+            帧: {currentFrameDisplayIndex} / {validIndices.length}
         </span>
       </div>
     </div>
